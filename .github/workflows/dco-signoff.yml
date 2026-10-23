@@ -1,0 +1,71 @@
+name: Apply authorized DCO sign-offs
+
+on:
+  push:
+    branches: [codex/validate-windows-input]
+    paths: [.github/workflows/dco-signoff.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  signoff:
+    if: github.repository == 'Adhamaboux/rustdesk' && github.actor == 'Adhamaboux'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the original PR commits
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: dab7bc34eb2810431d121ca0d8ff201bc106350e
+          fetch-depth: 4
+      - name: Recreate the three authorized commits without changing their trees
+        shell: python
+        run: |
+          import os
+          import subprocess
+
+          def git(*args, env=None, data=None):
+              return subprocess.run(
+                  ['git', *args], input=data, env=env, check=True,
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+              ).stdout.decode('utf-8').strip()
+
+          base = '398364fa187d0559c39462366a61dd0b25652e78'
+          old_head = 'dab7bc34eb2810431d121ca0d8ff201bc106350e'
+          branch = 'refs/heads/codex/coalesce-windows-mouse-backlog'
+          pairs = [
+              ('0d41d8672a81c30688c6746a168af24407b21f87', 'c292b88942a1cf9f76480ac00f97ccc85c9b72a4'),
+              ('af7a48ff60c20155c290179a598cde05508329fb', 'a25723b9584fd906f06e26b64eec0d1c6114228b'),
+              (old_head, 'c87eb936ee71adde537f244a89de54d1242553a1'),
+          ]
+          name = 'Adham'
+          email = '108608140+Adhamaboux@users.noreply.github.com'
+          trailer = f'Signed-off-by: {name} <{email}>'
+          assert git('ls-remote', 'origin', branch).split()[0] == old_head
+          parent = base
+          for old, expected in pairs:
+              tree = git('rev-parse', old + '^{tree}')
+              author = git('show', '-s', '--format=%an%x00%ae%x00%aI', old).split('\x00')
+              assert author[:2] == [name, email]
+              message = git('show', '-s', '--format=%B', old)
+              assert 'Signed-off-by:' not in message
+              env = dict(os.environ,
+                  GIT_AUTHOR_NAME=name, GIT_AUTHOR_EMAIL=email, GIT_AUTHOR_DATE=author[2],
+                  GIT_COMMITTER_NAME=name, GIT_COMMITTER_EMAIL=email,
+                  GIT_COMMITTER_DATE='2026-10-22T23:47:08-06:00',
+              )
+              new = git('commit-tree', tree, '-p', parent, '-F', '-', env=env,
+                  data=(message + '\n\n' + trailer + '\n').encode('utf-8'))
+              assert new == expected
+              assert git('rev-parse', new + '^{tree}') == tree
+              assert git('diff', old, new) == ''
+              assert git('show', '-s', '--format=%B', new).endswith(trailer)
+              print(f'{old} -> {new}: identical tree, authorized DCO trailer')
+              parent = new
+          git('diff', '--check', base, parent)
+          assert git('rev-list', '--count', base + '..' + parent) == '3'
+          git('push', '--force-with-lease=' + branch + ':' + old_head,
+              'origin', parent + ':' + branch)
+          assert git('ls-remote', 'origin', branch).split()[0] == parent
+          print('Published all three signed-off commits; source trees unchanged.')
