@@ -1,0 +1,95 @@
+name: Windows input queue validation
+
+on:
+  push:
+    branches: [codex/validate-windows-input]
+    paths: [.github/workflows/input-queue-validation.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-msvc:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 4
+      VCPKG_MAX_CONCURRENCY: 4
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+      VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+      VCPKG_DISABLE_METRICS: 1
+    steps:
+      - name: Check out the exact upstream PR revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: Adhamaboux/rustdesk
+          ref: dab7bc34eb2810431d121ca0d8ff201bc106350e
+          submodules: recursive
+          persist-credentials: false
+      - name: Install Rust 1.75.0
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: 1.75.0
+          targets: x86_64-pc-windows-msvc
+      - name: Install LLVM 15.0.6
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0
+        with:
+          version: 15.0.6
+      - name: Install CMake and select release-only native libraries
+        shell: pwsh
+        run: |
+          python -m pip install cmake==4.3.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $triplets = Join-Path $env:RUNNER_TEMP 'input-validation-triplets'
+          New-Item -ItemType Directory -Force -Path $triplets | Out-Null
+          @'
+          set(VCPKG_TARGET_ARCHITECTURE x64)
+          set(VCPKG_CRT_LINKAGE static)
+          set(VCPKG_LIBRARY_LINKAGE static)
+          set(VCPKG_BUILD_TYPE release)
+          '@ | Set-Content -LiteralPath (Join-Path $triplets 'x64-windows-static.cmake')
+          "VCPKG_OVERLAY_TRIPLETS=$triplets" >> $env:GITHUB_ENV
+      - name: Set up the upstream-pinned vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+      - name: Install native dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed" 2>&1 | tee native-build.log
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          prefix-key: input-queue-windows-msvc
+      - name: Record exact source and toolchain
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          git submodule status
+          rustc -Vv
+          cargo -V
+          git diff --exit-code
+      - name: Check Windows library with the feature enabled
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram,coalesce-mouse-moves 2>&1 | tee check-feature-on.log
+      - name: Check unchanged Windows path with the feature disabled
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram 2>&1 | tee check-feature-off.log
+      - name: Run integrated queue regression tests with the feature enabled
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram,coalesce-mouse-moves input_queue::tests -- --nocapture 2>&1 | tee tests-feature-on.log
+          grep -q '3 passed; 0 failed' tests-feature-on.log
+      - name: Run integrated queue regression tests with the feature disabled
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram input_queue::tests -- --nocapture 2>&1 | tee tests-feature-off.log
+          grep -q '3 passed; 0 failed' tests-feature-off.log
