@@ -1,0 +1,124 @@
+name: Windows installer runtime smoke
+'on':
+  push:
+    branches:
+    - codex/validate-windows-input
+    paths:
+    - .github/workflows/windows-installer-smoke.yml
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: read
+jobs:
+  smoke:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+    - name: Download exact experimental package
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: rustdesk-input-test-windows-x64
+        path: packages
+        run-id: 40018071391
+        github-token: ${{ github.token }}
+        repository: Adhamaboux/rustdesk
+    - name: Verify EXE extraction, Flutter window, installation and removal
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $expectedCommit = '286bf883e3cb9e84a2252e4fc7a07a997826bc7d'
+        $packageDir = (Resolve-Path packages).Path
+        $evidenceDir = Join-Path $env:GITHUB_WORKSPACE 'smoke-evidence'
+        New-Item -ItemType Directory -Path $evidenceDir | Out-Null
+        if ((Get-Content "$packageDir/source-commit.txt" -Raw).Trim() -ne $expectedCommit) { throw 'Unexpected source revision' }
+        foreach ($line in Get-Content "$packageDir/SHA256SUMS") {
+            if ($line -notmatch '^([a-f0-9]{64})  ([a-zA-Z0-9._-]+)$') { throw 'Invalid checksum entry' }
+            $hash = $Matches[1]
+            $name = $Matches[2]
+            if ((Get-FileHash (Join-Path $packageDir $name)).Hash.ToLower() -ne $hash) { throw "Hash mismatch: $name" }
+        }
+        'Artifact checksums and source revision matched.' | Set-Content "$evidenceDir/results.txt"
+
+        if (Get-Service RustDesk -ErrorAction SilentlyContinue) { throw 'Refusing to touch an existing RustDesk service' }
+        if (Get-Process rustdesk -ErrorAction SilentlyContinue) { throw 'Refusing to touch an existing RustDesk process' }
+        $installDir = Join-Path $env:ProgramFiles 'RustDesk'
+        $extractDir = Join-Path $env:LOCALAPPDATA 'rustdesk'
+        if ((Test-Path $installDir) -or (Test-Path $extractDir)) { throw 'Refusing to touch existing RustDesk files' }
+        $exe = Join-Path $packageDir 'rustdesk-1.5.1-input-test-x86_64.exe'
+        $msi = Join-Path $packageDir 'rustdesk-1.5.1-input-test-x86_64.msi'
+
+        function Wait-Check([scriptblock]$Condition, [string]$Failure, [int]$Seconds = 40) {
+            $limit = [DateTime]::UtcNow.AddSeconds($Seconds)
+            do {
+                if (& $Condition) { return }
+                Start-Sleep -Milliseconds 400
+            } while ([DateTime]::UtcNow -lt $limit)
+            throw $Failure
+        }
+
+        $extract = Start-Process $exe -ArgumentList '--version' -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput "$evidenceDir/extraction-stdout.txt" -RedirectStandardError "$evidenceDir/extraction-stderr.txt"
+        if ($extract.ExitCode -ne 0) { throw "Self-extractor exited with $($extract.ExitCode)" }
+        Wait-Check { Test-Path "$extractDir/librustdesk.dll" } 'EXE did not extract the library'
+        Wait-Check { (Get-Content "$evidenceDir/extraction-stdout.txt" -Raw) -match '(?m)^1\.5\.1\s*$' } 'Extracted application did not report the expected version'
+        'EXE extraction and child application version passed.' | Add-Content "$evidenceDir/results.txt"
+
+        $adminDir = Join-Path $env:RUNNER_TEMP 'rustdesk-msi-payload'
+        if (Test-Path $adminDir) { throw 'MSI extraction directory already exists' }
+        $adminLog = Join-Path $evidenceDir 'msi-extract.log'
+        $admin = Start-Process msiexec.exe -ArgumentList "/a `"$msi`" /qn TARGETDIR=`"$adminDir`" /l*v `"$adminLog`"" -Wait -PassThru -WindowStyle Hidden
+        if ($admin.ExitCode -ne 0) { throw "MSI extraction failed: $($admin.ExitCode)" }
+        $msiDlls = @(Get-ChildItem $adminDir -Recurse -Filter librustdesk.dll)
+        if ($msiDlls.Count -ne 1) { throw 'Expected one library in MSI payload' }
+        $payloadHash = (Get-FileHash "$extractDir/librustdesk.dll").Hash
+        if ($payloadHash -ne (Get-FileHash $msiDlls[0].FullName).Hash) { throw 'EXE and MSI contain different libraries' }
+        "EXE/MSI library match: $payloadHash" | Add-Content "$evidenceDir/results.txt"
+
+        $guiError = $null
+        $gui = Start-Process "$extractDir/rustdesk.exe" -PassThru -WindowStyle Hidden
+        try {
+            Wait-Check {
+                $gui.Refresh()
+                if ($gui.HasExited) { throw "GUI exited early: $($gui.ExitCode)" }
+                $gui.MainWindowHandle -ne 0
+            } 'Flutter did not create a top-level window'
+            Start-Sleep -Seconds 5
+            $gui.Refresh()
+            if ($gui.HasExited -or -not $gui.Responding) { throw 'Flutter window exited or stopped responding' }
+            'Flutter created a responsive top-level window and stayed running.' | Add-Content "$evidenceDir/results.txt"
+        } catch {
+            $guiError = $_
+            "GUI smoke failed: $($_.Exception.Message)" | Add-Content "$evidenceDir/results.txt"
+        } finally {
+            $gui.Refresh()
+            if (-not $gui.HasExited) { Stop-Process -Id $gui.Id -Force }
+            Get-CimInstance Win32_Process | Where-Object {
+                $_.ExecutablePath -eq (Join-Path $extractDir 'rustdesk.exe')
+            } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        }
+
+        try {
+            $setup = Start-Process $exe -ArgumentList '--silent-install','printer=0' -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput "$evidenceDir/exe-install-stdout.txt" -RedirectStandardError "$evidenceDir/exe-install-stderr.txt"
+            if ($setup.ExitCode -ne 0) { throw "EXE launcher exited with $($setup.ExitCode)" }
+            Wait-Check {
+                $service = Get-Service RustDesk -ErrorAction SilentlyContinue
+                $service -and $service.Status -eq 'Running' -and (Test-Path "$installDir/librustdesk.dll")
+            } 'EXE installation did not produce a running service' 90
+            if ((Get-FileHash "$installDir/librustdesk.dll").Hash -ne $payloadHash) { throw 'EXE-installed library differs from package' }
+            'EXE install passed: service running and installed library matched.' | Add-Content "$evidenceDir/results.txt"
+        } finally {
+            if (Test-Path "$installDir/rustdesk.exe") {
+                Start-Process "$installDir/rustdesk.exe" -ArgumentList '--uninstall' -Wait -WindowStyle Hidden
+                Wait-Check { -not (Get-Service RustDesk -ErrorAction SilentlyContinue) } 'EXE uninstall left the service behind' 60
+                Wait-Check { -not (Test-Path "$installDir/librustdesk.dll") } 'EXE uninstall left the application library behind' 60
+            }
+        }
+        'EXE uninstall removed service and application library.' | Add-Content "$evidenceDir/results.txt"
+        if ($guiError) { throw $guiError }
+    - name: Upload runtime smoke evidence
+      if: ${{ always() }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: windows-installer-runtime-evidence
+        path: smoke-evidence/
+        if-no-files-found: warn
+        retention-days: 30
