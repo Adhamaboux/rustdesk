@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           repository: Adhamaboux/rustdesk
-          ref: b53952f23dc44fa517141361f24c76cc9d1600cb
+          ref: ffd2c7005c146a017a1f85d8dcb82a355acbd94c
           submodules: recursive
           persist-credentials: false
       - name: Install Rust 1.75.0
@@ -82,6 +82,11 @@ jobs:
         run: |
           set -o pipefail
           cargo check --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram 2>&1 | tee check-feature-off.log
+      - name: Run Clippy on the root library without linting dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram,coalesce-mouse-moves -- --no-deps 2>&1 | tee clippy-feature-on.log
       - name: Run integrated queue regression tests with the feature enabled
         shell: bash
         run: |
@@ -94,8 +99,3 @@ jobs:
           set -o pipefail
           cargo test --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram input_queue::tests -- --nocapture 2>&1 | tee tests-feature-off.log
           grep -q '3 passed; 0 failed' tests-feature-off.log
-      - name: Run Clippy on the root library without linting dependencies
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo clippy --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram,coalesce-mouse-moves -- --no-deps 2>&1 | tee clippy-feature-on.log
