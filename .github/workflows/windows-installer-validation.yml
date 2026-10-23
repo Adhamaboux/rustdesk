@@ -32,7 +32,7 @@ jobs:
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       with:
         repository: Adhamaboux/rustdesk
-        ref: 286bf883e3cb9e84a2252e4fc7a07a997826bc7d
+        ref: 1c3d8f1f0fa443053a8c2fa476d81aa21f2279c0
         submodules: recursive
         persist-credentials: false
     - name: Install prerequisites
@@ -109,7 +109,7 @@ jobs:
       RUST_VERSION: '1.75'
     timeout-minutes: 60
   topmost:
-    uses: Adhamaboux/rustdesk/.github/workflows/third-party-RustDeskTempTopMostWindow.yml@286bf883e3cb9e84a2252e4fc7a07a997826bc7d
+    uses: Adhamaboux/rustdesk/.github/workflows/third-party-RustDeskTempTopMostWindow.yml@1c3d8f1f0fa443053a8c2fa476d81aa21f2279c0
     with:
       upload-artifact: true
       target: windows-2022
@@ -127,7 +127,7 @@ jobs:
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       with:
         repository: Adhamaboux/rustdesk
-        ref: 286bf883e3cb9e84a2252e4fc7a07a997826bc7d
+        ref: 1c3d8f1f0fa443053a8c2fa476d81aa21f2279c0
         submodules: recursive
         persist-credentials: false
     - name: Install Rust 1.75.0
@@ -199,7 +199,7 @@ jobs:
       run: |
         set -euo pipefail
         mkdir -p validation
-        test "$(git rev-parse HEAD)" = "286bf883e3cb9e84a2252e4fc7a07a997826bc7d"
+        test "$(git rev-parse HEAD)" = "1c3d8f1f0fa443053a8c2fa476d81aa21f2279c0"
         git diff --exit-code
         git rev-parse HEAD > validation/source-commit.txt
         git submodule status > validation/submodules.txt
@@ -292,7 +292,7 @@ jobs:
         python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
         popd
         mkdir -p ./SignOutput
-        mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/rustdesk-1.5.1-input-test-x86_64.exe
+        mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/rustdesk-1.5.1-input-test.2-x86_64.exe
     - name: Add MSBuild to PATH
       uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce
       with:
@@ -310,7 +310,7 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'MSI build failed' }
         $packages = @(Get-ChildItem ./Package/bin/*/Release/en-us/Package.msi)
         if ($packages.Count -ne 1) { throw 'Expected exactly one MSI' }
-        Copy-Item $packages[0].FullName ../../SignOutput/rustdesk-1.5.1-input-test-x86_64.msi
+        Copy-Item $packages[0].FullName ../../SignOutput/rustdesk-1.5.1-input-test.2-x86_64.msi
         Pop-Location
     - name: Record artifact checksums
       shell: pwsh
@@ -320,7 +320,7 @@ jobs:
         Copy-Item validation/source-commit.txt,validation/features.txt,validation/SHA256SUMS SignOutput
         @'
         Experimental unsigned Windows x64 build of PR #16666.
-        Source: 286bf883e3cb9e84a2252e4fc7a07a997826bc7d
+        Source: 1c3d8f1f0fa443053a8c2fa476d81aa21f2279c0
         Features: hwcodec,vram,flutter,coalesce-mouse-moves
         This is not an official RustDesk release. Test only in a disposable environment.
         Do not replace an existing working installation without a separate rollout decision.
@@ -350,6 +350,12 @@ jobs:
       run: |-
         set -euo pipefail
         cargo clippy --locked --release --lib --features hwcodec,vram,flutter,coalesce-mouse-moves -- --no-deps 2>&1 | tee "validation/windows-clippy-with-flutter-and-feature-enabled.log"
+    - name: Windows Clippy with Flutter and feature disabled
+      shell: bash
+      if: ${{ !cancelled() && steps.packages.outcome == 'success' }}
+      run: |-
+        set -euo pipefail
+        cargo clippy --locked --release --lib --features hwcodec,vram,flutter -- --no-deps 2>&1 | tee "validation/windows-clippy-with-flutter-and-feature-disabled.log"
     - name: Flutter regression tests
       shell: bash
       if: ${{ !cancelled() && steps.packages.outcome == 'success' }}
@@ -365,7 +371,7 @@ jobs:
         if (Get-Service RustDesk -ErrorAction SilentlyContinue) { throw 'Refusing to replace an existing RustDesk service' }
         $installDir = Join-Path $env:ProgramFiles 'RustDesk'
         if (Test-Path $installDir) { throw 'Refusing to replace an existing installation' }
-        $msi = (Resolve-Path SignOutput/rustdesk-1.5.1-input-test-x86_64.msi).Path
+        $msi = (Resolve-Path SignOutput/rustdesk-1.5.1-input-test.2-x86_64.msi).Path
         $log = Join-Path $env:GITHUB_WORKSPACE 'validation/msi-install.log'
         $cleanupLog = Join-Path $env:GITHUB_WORKSPACE 'validation/msi-uninstall.log'
         try {
