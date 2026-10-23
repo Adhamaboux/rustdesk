@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           repository: Adhamaboux/rustdesk
-          ref: 16ab89a0eb263eea76ad5022bf44d18e23febb69
+          ref: b53952f23dc44fa517141361f24c76cc9d1600cb
           submodules: recursive
           persist-credentials: false
       - name: Install Rust 1.75.0
