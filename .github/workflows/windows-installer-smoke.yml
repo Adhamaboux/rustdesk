@@ -37,7 +37,7 @@ jobs:
             $name = $Matches[2]
             if ((Get-FileHash (Join-Path $packageDir $name)).Hash.ToLower() -ne $hash) { throw "Hash mismatch: $name" }
         }
-        'Artifact checksums and source revision matched.' | Set-Content "$evidenceDir/results.txt"
+        'Artifact checksums and source revision matched.' | Tee-Object -FilePath "$evidenceDir/results.txt"
 
         if (Get-Service RustDesk -ErrorAction SilentlyContinue) { throw 'Refusing to touch an existing RustDesk service' }
         if (Get-Process rustdesk -ErrorAction SilentlyContinue) { throw 'Refusing to touch an existing RustDesk process' }
@@ -56,38 +56,75 @@ jobs:
             throw $Failure
         }
 
-        $extract = Start-Process $exe -ArgumentList '--version' -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput "$evidenceDir/extraction-stdout.txt" -RedirectStandardError "$evidenceDir/extraction-stderr.txt"
+        Write-Host 'Checking EXE extraction and CLI version.'
+        $extract = Start-Process $exe -ArgumentList '--version' -PassThru -WindowStyle Hidden -RedirectStandardOutput "$evidenceDir/extraction-stdout.txt" -RedirectStandardError "$evidenceDir/extraction-stderr.txt"
+        if (-not $extract.WaitForExit(60000)) { throw 'EXE extractor did not exit within 60 seconds' }
         if ($extract.ExitCode -ne 0) { throw "Self-extractor exited with $($extract.ExitCode)" }
         Wait-Check { Test-Path "$extractDir/librustdesk.dll" } 'EXE did not extract the library'
         Wait-Check { (Get-Content "$evidenceDir/extraction-stdout.txt" -Raw) -match '(?m)^1\.5\.1\s*$' } 'Extracted application did not report the expected version'
-        'EXE extraction and child application version passed.' | Add-Content "$evidenceDir/results.txt"
+        'EXE extraction and child application version passed.' | Tee-Object -FilePath "$evidenceDir/results.txt" -Append
 
         $adminDir = Join-Path $env:RUNNER_TEMP 'rustdesk-msi-payload'
         if (Test-Path $adminDir) { throw 'MSI extraction directory already exists' }
         $adminLog = Join-Path $evidenceDir 'msi-extract.log'
-        $admin = Start-Process msiexec.exe -ArgumentList "/a `"$msi`" /qn TARGETDIR=`"$adminDir`" /l*v `"$adminLog`"" -Wait -PassThru -WindowStyle Hidden
+        Write-Host 'Extracting MSI payload for hash comparison.'
+        $admin = Start-Process msiexec.exe -ArgumentList "/a `"$msi`" /qn TARGETDIR=`"$adminDir`" /l*v `"$adminLog`"" -PassThru -WindowStyle Hidden
+        if (-not $admin.WaitForExit(90000)) { throw 'MSI extraction did not exit within 90 seconds' }
         if ($admin.ExitCode -ne 0) { throw "MSI extraction failed: $($admin.ExitCode)" }
         $msiDlls = @(Get-ChildItem $adminDir -Recurse -Filter librustdesk.dll)
         if ($msiDlls.Count -ne 1) { throw 'Expected one library in MSI payload' }
         $payloadHash = (Get-FileHash "$extractDir/librustdesk.dll").Hash
         if ($payloadHash -ne (Get-FileHash $msiDlls[0].FullName).Hash) { throw 'EXE and MSI contain different libraries' }
-        "EXE/MSI library match: $payloadHash" | Add-Content "$evidenceDir/results.txt"
+        "EXE/MSI library match: $payloadHash" | Tee-Object -FilePath "$evidenceDir/results.txt" -Append
 
+        Add-Type @'
+        using System;
+        using System.Runtime.InteropServices;
+        using System.Text;
+        public static class FlutterWindowProbe {
+            private delegate bool EnumProc(IntPtr hwnd, IntPtr param);
+            [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr param);
+            [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder text, int length);
+            [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint message, IntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+            public static IntPtr Find(uint processId) {
+                IntPtr found = IntPtr.Zero;
+                EnumWindows((hwnd, unused) => {
+                    uint owner;
+                    GetWindowThreadProcessId(hwnd, out owner);
+                    var name = new StringBuilder(256);
+                    GetClassName(hwnd, name, name.Capacity);
+                    if (owner == processId && name.ToString() == "FLUTTER_RUNNER_WIN32_WINDOW") {
+                        found = hwnd;
+                        return false;
+                    }
+                    return true;
+                }, IntPtr.Zero);
+                return found;
+            }
+            public static bool Responds(IntPtr hwnd) {
+                UIntPtr result;
+                return SendMessageTimeout(hwnd, 0, IntPtr.Zero, IntPtr.Zero, 2, 5000, out result) != IntPtr.Zero;
+            }
+        }
+        '@
         $guiError = $null
+        Write-Host 'Checking Flutter window startup.'
         $gui = Start-Process "$extractDir/rustdesk.exe" -PassThru -WindowStyle Hidden
         try {
             Wait-Check {
                 $gui.Refresh()
                 if ($gui.HasExited) { throw "GUI exited early: $($gui.ExitCode)" }
-                $gui.MainWindowHandle -ne 0
+                [FlutterWindowProbe]::Find($gui.Id) -ne [IntPtr]::Zero
             } 'Flutter did not create a top-level window'
             Start-Sleep -Seconds 5
             $gui.Refresh()
-            if ($gui.HasExited -or -not $gui.Responding) { throw 'Flutter window exited or stopped responding' }
-            'Flutter created a responsive top-level window and stayed running.' | Add-Content "$evidenceDir/results.txt"
+            $guiWindow = [FlutterWindowProbe]::Find($gui.Id)
+            if ($gui.HasExited -or $guiWindow -eq [IntPtr]::Zero -or -not [FlutterWindowProbe]::Responds($guiWindow)) { throw 'Flutter window exited or stopped responding' }
+            'Flutter created its native top-level window and responded to WM_NULL. Visual rendering and remote input were not tested.' | Tee-Object -FilePath "$evidenceDir/results.txt" -Append
         } catch {
             $guiError = $_
-            "GUI smoke failed: $($_.Exception.Message)" | Add-Content "$evidenceDir/results.txt"
+            "GUI smoke failed: $($_.Exception.Message)" | Tee-Object -FilePath "$evidenceDir/results.txt" -Append
         } finally {
             $gui.Refresh()
             if (-not $gui.HasExited) { Stop-Process -Id $gui.Id -Force }
@@ -97,22 +134,26 @@ jobs:
         }
 
         try {
-            $setup = Start-Process $exe -ArgumentList '--silent-install','printer=0' -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput "$evidenceDir/exe-install-stdout.txt" -RedirectStandardError "$evidenceDir/exe-install-stderr.txt"
+            Write-Host 'Checking EXE silent installation.'
+            $setup = Start-Process $exe -ArgumentList '--silent-install','printer=0' -PassThru -WindowStyle Hidden -RedirectStandardOutput "$evidenceDir/exe-install-stdout.txt" -RedirectStandardError "$evidenceDir/exe-install-stderr.txt"
+            if (-not $setup.WaitForExit(60000)) { throw 'EXE launcher did not exit within 60 seconds' }
             if ($setup.ExitCode -ne 0) { throw "EXE launcher exited with $($setup.ExitCode)" }
             Wait-Check {
                 $service = Get-Service RustDesk -ErrorAction SilentlyContinue
                 $service -and $service.Status -eq 'Running' -and (Test-Path "$installDir/librustdesk.dll")
             } 'EXE installation did not produce a running service' 90
             if ((Get-FileHash "$installDir/librustdesk.dll").Hash -ne $payloadHash) { throw 'EXE-installed library differs from package' }
-            'EXE install passed: service running and installed library matched.' | Add-Content "$evidenceDir/results.txt"
+            'EXE install passed: service running and installed library matched.' | Tee-Object -FilePath "$evidenceDir/results.txt" -Append
         } finally {
             if (Test-Path "$installDir/rustdesk.exe") {
-                Start-Process "$installDir/rustdesk.exe" -ArgumentList '--uninstall' -Wait -WindowStyle Hidden
+                Write-Host 'Checking EXE uninstall.'
+                $uninstall = Start-Process "$installDir/rustdesk.exe" -ArgumentList '--uninstall' -PassThru -WindowStyle Hidden
+                if (-not $uninstall.WaitForExit(60000)) { throw 'EXE uninstall launcher did not exit within 60 seconds' }
                 Wait-Check { -not (Get-Service RustDesk -ErrorAction SilentlyContinue) } 'EXE uninstall left the service behind' 60
                 Wait-Check { -not (Test-Path "$installDir/librustdesk.dll") } 'EXE uninstall left the application library behind' 60
             }
         }
-        'EXE uninstall removed service and application library.' | Add-Content "$evidenceDir/results.txt"
+        'EXE uninstall removed service and application library.' | Tee-Object -FilePath "$evidenceDir/results.txt" -Append
         if ($guiError) { throw $guiError }
     - name: Upload runtime smoke evidence
       if: ${{ always() }}
