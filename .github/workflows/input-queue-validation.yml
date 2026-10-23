@@ -82,11 +82,6 @@ jobs:
         run: |
           set -o pipefail
           cargo check --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram 2>&1 | tee check-feature-off.log
-      - name: Run Clippy with the supported Windows toolchain
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo clippy --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram,coalesce-mouse-moves 2>&1 | tee clippy-feature-on.log
       - name: Run integrated queue regression tests with the feature enabled
         shell: bash
         run: |
@@ -99,3 +94,8 @@ jobs:
           set -o pipefail
           cargo test --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram input_queue::tests -- --nocapture 2>&1 | tee tests-feature-off.log
           grep -q '3 passed; 0 failed' tests-feature-off.log
+      - name: Run Clippy on the root library without linting dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --release --lib --target x86_64-pc-windows-msvc --features hwcodec,vram,coalesce-mouse-moves -- --no-deps 2>&1 | tee clippy-feature-on.log
